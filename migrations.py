@@ -134,43 +134,70 @@ def get_current_version(cursor):
 
 def run_migrations(conn):
     """Run all pending migrations"""
-    with conn.cursor() as cur:
-        try:
-            # Start transaction
-            conn.autocommit = False
-            
-            # Get current version
-            current_version = get_current_version(cur)
-            logger.info(f"Current database version: {current_version}")
-            
-            # Run pending migrations
-            for migration in MIGRATIONS:
-                version = migration['version']
-                if version > current_version:
-                    logger.info(f"Running migration {version}: {migration['description']}")
-                    try:
-                        # Run migration
-                        cur.execute(migration['up'])
-                        
-                        # Record migration
-                        cur.execute("""
-                            INSERT INTO schema_migrations (version, description)
-                            VALUES (%s, %s)
-                        """, (version, migration['description']))
-                        
-                        logger.info(f"Successfully applied migration {version}")
-                    except Exception as e:
-                        conn.rollback()
-                        logger.error(f"Error applying migration {version}: {e}")
-                        raise
-            
-            # Commit transaction
-            conn.commit()
-            logger.info("All migrations completed successfully")
-            
-        except Exception as e:
+    cur = None
+    try:
+        # Force autocommit off initially
+        conn.set_session(autocommit=False)
+        cur = conn.cursor()
+        
+        # First ensure the migrations table exists in its own transaction
+        cur.execute("""
+            DO $$ 
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT FROM pg_tables 
+                    WHERE schemaname = 'public' 
+                    AND tablename = 'schema_migrations'
+                ) THEN
+                    CREATE TABLE schema_migrations (
+                        version INTEGER PRIMARY KEY,
+                        description TEXT NOT NULL,
+                        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                END IF;
+            END $$;
+        """)
+        conn.commit()
+        
+        # Get current version
+        cur.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
+        current_version = cur.fetchone()[0]
+        logger.info(f"Current database version: {current_version}")
+        
+        # Run each migration in its own transaction
+        for migration in MIGRATIONS:
+            version = migration['version']
+            if version > current_version:
+                logger.info(f"Running migration {version}: {migration['description']}")
+                try:
+                    # Run migration statements one by one
+                    statements = [s.strip() for s in migration['up'].split(';') if s.strip()]
+                    for statement in statements:
+                        if statement:
+                            cur.execute(statement)
+                    
+                    # Record successful migration
+                    cur.execute("""
+                        INSERT INTO schema_migrations (version, description)
+                        VALUES (%s, %s)
+                    """, (version, migration['description']))
+                    
+                    conn.commit()
+                    logger.info(f"Successfully applied migration {version}")
+                except Exception as e:
+                    conn.rollback()
+                    logger.error(f"Error applying migration {version}: {e}")
+                    raise
+        
+        logger.info("All migrations completed successfully")
+        
+    except Exception as e:
+        if conn and not conn.closed:
             conn.rollback()
-            logger.error(f"Migration failed: {e}")
-            raise
-        finally:
-            conn.autocommit = True
+        logger.error(f"Migration failed: {e}")
+        raise
+    finally:
+        if cur:
+            cur.close()
+        if conn and not conn.closed:
+            conn.set_session(autocommit=True)

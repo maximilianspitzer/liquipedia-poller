@@ -159,6 +159,11 @@ def create_database_connection():
             keepalives_count=5,
             connect_timeout=DB_CONNECT_TIMEOUT
         )
+        
+        # Check if there's a lingering transaction and roll it back
+        if conn.get_transaction_status() != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+            conn.rollback()
+            
         logger.info("Successfully established database connection")
         return conn
     except psycopg2.Error as e:

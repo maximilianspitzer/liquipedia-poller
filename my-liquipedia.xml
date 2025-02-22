@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>liquipedia-poller</Name>
-  <Repository>ghcr.io/maximilianspitzer/liquipedia-poller</Repository>
+  <Repository>ghcr.io/maximilianspitzer/liquipedia-poller:main</Repository>
   <Registry>https://github.com/maximilianspitzer/liquipedia-poller/pkgs/container/liquipedia-poller</Registry>
   <Network>bridge</Network>
   <Privileged>false</Privileged>
