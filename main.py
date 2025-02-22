@@ -1,32 +1,119 @@
 import os
+import sys
 import time
 import re
+import logging
+import threading
 from bs4 import BeautifulSoup
 import requests
 import psycopg2
-from psycopg2 import sql
+from psycopg2 import sql, pool
 from dotenv import load_dotenv
 from datetime import datetime
 from contextlib import contextmanager
+from tenacity import retry, stop_after_attempt, wait_exponential, RetryError
+from threading import Lock
+from config import *
+from exceptions import *
+from schema import Team, Tournament, Match, MatchDependency
+
+# Configure logging
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL),
+    format=LOG_FORMAT,
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
 
+class DatabasePool:
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super(DatabasePool, cls).__new__(cls)
+                    cls._instance._initialize_pool()
+        return cls._instance
+    
+    def _initialize_pool(self):
+        try:
+            self.pool = pool.ThreadedConnectionPool(
+                DB_POOL_MIN_CONN,
+                DB_POOL_MAX_CONN,
+                dbname=os.getenv('DB_NAME'),
+                user=os.getenv('DB_USER'),
+                password=os.getenv('DB_PASSWORD'),
+                host=os.getenv('DB_HOST'),
+                port=os.getenv('DB_PORT'),
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5
+            )
+            logger.info("Connection pool initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing connection pool: {e}")
+            raise DatabaseError(f"Failed to initialize connection pool: {e}")
+
+    @contextmanager
+    def get_connection(self):
+        conn = None
+        try:
+            conn = self.pool.getconn()
+            yield conn
+        except Exception as e:
+            logger.error(f"Error getting connection from pool: {e}")
+            raise
+        finally:
+            if conn:
+                self.pool.putconn(conn)
+
+    def close(self):
+        """Close all connections in the pool"""
+        if hasattr(self, 'pool'):
+            self.pool.closeall()
+            logger.info("Connection pool closed")
+
+# Global database pool instance
+db_pool = DatabasePool()
+
 @contextmanager
 def get_db_connection(dbname='postgres'):
-    """Context manager for database connections"""
-    conn = psycopg2.connect(
-        dbname=dbname,
-        user=os.getenv('DB_USER'),
-        password=os.getenv('DB_PASSWORD'),
-        host=os.getenv('DB_HOST'),
-        port=os.getenv('DB_PORT')
-    )
-    conn.autocommit = True
+    """Context manager for database connections with improved error handling"""
+    conn = None
     try:
+        conn = psycopg2.connect(
+            dbname=dbname,
+            user=os.getenv('DB_USER'),
+            password=os.getenv('DB_PASSWORD'),
+            host=os.getenv('DB_HOST'),
+            port=os.getenv('DB_PORT'),
+            # Add connection pooling and timeout settings
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
+            connect_timeout=10
+        )
+        conn.autocommit = True
         yield conn
+    except psycopg2.Error as e:
+        logger.error(f"Database connection error: {e}")
+        raise
     finally:
-        conn.close()
+        if conn is not None:
+            try:
+                conn.close()
+            except psycopg2.Error as e:
+                logger.error(f"Error closing database connection: {e}")
 
 def create_database():
     try:
@@ -56,112 +143,263 @@ def create_database():
     except Exception as e:
         print(f"Error creating database: {e}")
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
 def create_database_connection():
-    return psycopg2.connect(
-        dbname=os.getenv('DB_NAME'),
-        user=os.getenv('DB_USER'),
-        password=os.getenv('DB_PASSWORD'),
-        host=os.getenv('DB_HOST'),
-        port=os.getenv('DB_PORT')
-    )
+    """Create database connection with retry mechanism"""
+    try:
+        conn = psycopg2.connect(
+            dbname=os.getenv('DB_NAME'),
+            user=os.getenv('DB_USER'),
+            password=os.getenv('DB_PASSWORD'),
+            host=os.getenv('DB_HOST'),
+            port=os.getenv('DB_PORT'),
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
+            connect_timeout=DB_CONNECT_TIMEOUT
+        )
+        logger.info("Successfully established database connection")
+        return conn
+    except psycopg2.Error as e:
+        logger.error(f"Database connection error: {e}")
+        raise DatabaseError(f"Failed to connect to database: {e}") from e
+    except Exception as e:
+        logger.error(f"Unexpected error during database connection: {e}")
+        raise
 
 def create_tables(conn):
+    """Create database tables if they don't exist and handle schema updates"""
     with conn.cursor() as cur:
-        # Create teams table with increased field lengths
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS teams (
-                team_id SERIAL PRIMARY KEY,
-                team_name VARCHAR(200) UNIQUE NOT NULL,
-                region VARCHAR(100) NOT NULL
-            )
-        """)
-        
-        # Create tournaments table with increased field lengths
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tournaments (
-                tournament_id SERIAL PRIMARY KEY,
-                name VARCHAR(300) UNIQUE NOT NULL,
-                date DATE NOT NULL,
-                region VARCHAR(100) NOT NULL
-            )
-        """)
-        
-        # Create matches table with increased field lengths
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS matches (
-                match_id SERIAL PRIMARY KEY,
-                tournament_id INTEGER REFERENCES tournaments(tournament_id),
-                team1_id INTEGER REFERENCES teams(team_id),
-                team2_id INTEGER REFERENCES teams(team_id),
-                winner_id INTEGER REFERENCES teams(team_id),
-                score VARCHAR(50),
-                stage VARCHAR(200),
-                match_date TIMESTAMP,
-                status VARCHAR(50) DEFAULT 'completed',
-                UNIQUE(tournament_id, team1_id, team2_id, match_date)
-            )
-        """)
-        
-        # Create team points table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS team_points (
-                id SERIAL PRIMARY KEY,
-                team_id INTEGER REFERENCES teams(team_id),
-                tournament_id INTEGER REFERENCES tournaments(tournament_id),
-                points INTEGER NOT NULL,
-                UNIQUE(team_id, tournament_id)
-            )
-        """)
-        
-        # Create match_dependencies table
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS match_dependencies (
-                dependency_id SERIAL PRIMARY KEY,
-                source_match_id INTEGER REFERENCES matches(match_id),
-                target_match_id INTEGER REFERENCES matches(match_id),
-                position INTEGER CHECK (position IN (1, 2)),
-                dependency_type VARCHAR(50) CHECK (dependency_type IN ('winner', 'loser')),
-                UNIQUE(source_match_id, target_match_id)
-            )
-        """)
-        
-        conn.commit()
+        try:
+            # Begin transaction
+            conn.autocommit = False
+            
+            # Create tables
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS teams (
+                    team_id SERIAL PRIMARY KEY,
+                    team_name VARCHAR(200) UNIQUE NOT NULL,
+                    region VARCHAR(100) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tournaments (
+                    tournament_id SERIAL PRIMARY KEY,
+                    name VARCHAR(300) UNIQUE NOT NULL,
+                    date DATE NOT NULL,
+                    region VARCHAR(100) NOT NULL,
+                    status VARCHAR(50) DEFAULT 'upcoming',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CHECK (status IN ('upcoming', 'ongoing', 'completed'))
+                )
+            """)
+            
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS matches (
+                    match_id SERIAL PRIMARY KEY,
+                    tournament_id INTEGER REFERENCES tournaments(tournament_id) ON DELETE CASCADE,
+                    team1_id INTEGER REFERENCES teams(team_id),
+                    team2_id INTEGER REFERENCES teams(team_id),
+                    winner_id INTEGER REFERENCES teams(team_id),
+                    score VARCHAR(50),
+                    stage VARCHAR(200),
+                    match_date TIMESTAMP,
+                    status VARCHAR(50) DEFAULT 'scheduled',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(tournament_id, team1_id, team2_id, match_date),
+                    CHECK (status IN ('scheduled', 'ongoing', 'completed', 'cancelled'))
+                )
+            """)
+            
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS team_points (
+                    id SERIAL PRIMARY KEY,
+                    team_id INTEGER REFERENCES teams(team_id) ON DELETE CASCADE,
+                    tournament_id INTEGER REFERENCES tournaments(tournament_id) ON DELETE CASCADE,
+                    points INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(team_id, tournament_id)
+                )
+            """)
+            
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS match_dependencies (
+                    dependency_id SERIAL PRIMARY KEY,
+                    source_match_id INTEGER REFERENCES matches(match_id) ON DELETE CASCADE,
+                    target_match_id INTEGER REFERENCES matches(match_id) ON DELETE CASCADE,
+                    position INTEGER CHECK (position IN (1, 2)),
+                    dependency_type VARCHAR(50) CHECK (dependency_type IN ('winner', 'loser')),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(source_match_id, target_match_id)
+                )
+            """)
+            
+            # Create update trigger function if it doesn't exist
+            cur.execute("""
+                CREATE OR REPLACE FUNCTION update_updated_at_column()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    NEW.updated_at = CURRENT_TIMESTAMP;
+                    RETURN NEW;
+                END;
+                $$ language 'plpgsql'
+            """)
+            
+            # Create triggers for all tables
+            for table in ['teams', 'tournaments', 'matches', 'team_points']:
+                cur.execute(f"""
+                    DROP TRIGGER IF EXISTS update_{table}_updated_at ON {table};
+                    CREATE TRIGGER update_{table}_updated_at
+                    BEFORE UPDATE ON {table}
+                    FOR EACH ROW
+                    EXECUTE FUNCTION update_updated_at_column();
+                """)
+            
+            # Create indexes for better query performance
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_matches_tournament_id ON matches(tournament_id);
+                CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
+                CREATE INDEX IF NOT EXISTS idx_team_points_team_id ON team_points(team_id);
+                CREATE INDEX IF NOT EXISTS idx_tournaments_region_date ON tournaments(region, date);
+            """)
+            
+            conn.commit()
+            logger.info("Database tables and triggers created/updated successfully")
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error creating database tables: {e}")
+            raise DatabaseError(f"Failed to create database tables: {e}")
+        finally:
+            conn.autocommit = True
 
-def fetch_page_content(url):
+class ExponentialBackoff:
+    """Implements exponential backoff algorithm for retries"""
+    def __init__(self, initial_delay: float = 1.0, max_delay: float = 60.0, multiplier: float = 2.0):
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.multiplier = multiplier
+        self.current_delay = initial_delay
+        self.attempts = 0
+
+    def reset(self):
+        """Reset the backoff to initial state"""
+        self.current_delay = self.initial_delay
+        self.attempts = 0
+
+    def get_next_delay(self) -> float:
+        """Get the next delay interval"""
+        delay = min(self.current_delay * (self.multiplier ** self.attempts), self.max_delay)
+        self.attempts += 1
+        return delay
+
+class RateLimiter:
+    def __init__(self, requests_per_minute=30):
+        self.requests_per_minute = requests_per_minute
+        self.min_interval = 60.0 / requests_per_minute
+        self.last_request_time = {}  # Dictionary for multiple domains
+        self.backoff = {}  # Dictionary of ExponentialBackoff instances per domain
+        self.lock = Lock()  # Thread-safe lock
+
+    def _get_backoff(self, domain: str) -> ExponentialBackoff:
+        """Get or create backoff instance for domain"""
+        if domain not in self.backoff:
+            self.backoff[domain] = ExponentialBackoff()
+        return self.backoff[domain]
+
+    def wait(self, domain='default'):
+        """Wait if necessary to respect rate limits for specific domain"""
+        with self.lock:
+            current_time = time.time()
+            backoff = self._get_backoff(domain)
+            
+            if domain in self.last_request_time:
+                elapsed = current_time - self.last_request_time[domain]
+                if elapsed < self.min_interval:
+                    sleep_time = self.min_interval - elapsed
+                    logger.debug(f"Rate limiting {domain}: sleeping for {sleep_time:.2f} seconds")
+                    time.sleep(sleep_time)
+            
+            self.last_request_time[domain] = time.time()
+
+    def handle_429(self, domain='default'):
+        """Handle rate limit exceeded (HTTP 429)"""
+        with self.lock:
+            backoff = self._get_backoff(domain)
+            delay = backoff.get_next_delay()
+            logger.warning(f"Rate limit exceeded for {domain}. Backing off for {delay:.2f} seconds")
+            time.sleep(delay)
+
+    def reset(self, domain='default'):
+        """Reset rate limiter and backoff for a domain"""
+        with self.lock:
+            if domain in self.last_request_time:
+                del self.last_request_time[domain]
+            if domain in self.backoff:
+                self.backoff[domain].reset()
+
+# Create global rate limiter instance with configuration
+rate_limiter = RateLimiter(requests_per_minute=REQUESTS_PER_MINUTE)
+
+def fetch_page_content(url, max_retries=3, retry_delay=5):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
     }
     
-    time.sleep(2)  # Rate limiting
-    full_url = f"https://liquipedia.net{url}"
-    print(f"\nFetching {full_url}")
-    
-    try:
-        response = requests.get(full_url, headers=headers)
-        print(f"Status: {response.status_code}")
-        
-        if response.status_code == 200:
-            content = response.text
-            print(f"Content length: {len(content)} bytes")
+    domain = 'liquipedia.net'
+    for attempt in range(max_retries):
+        try:
+            rate_limiter.wait(domain)  # Use domain-specific rate limiting
+            full_url = f"{BASE_URL}{url}"
+            logger.info(f"Fetching {full_url} (attempt {attempt + 1}/{max_retries})")
             
-            soup = BeautifulSoup(content, 'html.parser')
-            main_content = soup.find('div', class_='mw-parser-output')
+            response = requests.get(full_url, headers=headers, timeout=REQUEST_TIMEOUT)
+            logger.info(f"Status: {response.status_code}")
             
-            if (main_content):
-                print("\nFound main content area:")
-                print(f"Tables found: {len(main_content.find_all('table'))}")
-                print(f"Bracket elements: {len(main_content.find_all('div', class_=lambda x: x and 'bracket' in x))}")
+            if response.status_code == 200:
+                content = response.text
+                logger.debug(f"Content length: {len(content)} bytes")
+                
+                soup = BeautifulSoup(content, 'html.parser')
+                main_content = soup.find('div', class_='mw-parser-output')
+                
+                if main_content:
+                    logger.debug(f"Found main content area with {len(main_content.find_all('div'))} div elements")
+                    return content
+                else:
+                    logger.warning("Main content area not found in response")
+                    
+            elif response.status_code == 429:  # Too Many Requests
+                rate_limiter.handle_429(domain)  # Handle rate limit exceeded
+                continue
+                
+            elif response.status_code == 404:
+                logger.error(f"Page not found: {full_url}")
+                return None
+                
+            else:
+                logger.error(f"Failed to fetch page. Status code: {response.status_code}")
+                
+        except requests.RequestException as e:
+            logger.error(f"Request error: {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                continue
+                
+        except Exception as e:
+            logger.error(f"Unexpected error during page fetch: {str(e)}")
+            break
             
-            return content
-        else:
-            print(f"Failed to fetch page. Status code: {response.status_code}")
-            return None
-            
-    except requests.RequestException as e:
-        print(f"Request error: {e}")
-        return None
+    raise ScrapingError(f"Failed to fetch page after {max_retries} attempts: {url}")
 
 def parse_match_date(date_str):
     """Parse date strings from Liquipedia"""
@@ -189,23 +427,38 @@ def parse_match_date(date_str):
         return datetime.now()
 
 def extract_team_name(raw_name):
-    """Clean team names by removing team tags"""
+    """Clean team names by removing team handles that appear at the end in CAPS"""
     if not raw_name or 'TBD' in raw_name:
         return None
         
-    # Common team name patterns to clean up
-    patterns = [
-        r'(.*?)(Gaming|Esports?|NA|TRB|NASKC|PSM|TE|TH|KZK|ECP|FUT|SK|OG)\s*$',  # Suffixes
-        r'(.*?)\s+[A-Z]+\s*$'  # Capital letter codes at the end
-    ]
+    # Known team prefixes that have special cleaning rules
+    team_prefixes = {
+        'SKCalalas': lambda x: 'SKCalalas NA' if 'NASKC' in x else x,
+    }
+    
+    # Known teams that should not be modified at all
+    no_clean_teams = {
+        'Tribe Gaming',
+        'FUT Esports'
+    }
     
     name = raw_name.strip()
-    for pattern in patterns:
-        match = re.search(pattern, name)
-        if match:
-            name = match.group(1).strip()
+    
+    # Check for exact matches first
+    if name in no_clean_teams:
+        return name
+        
+    # Check for team prefixes with special rules
+    for prefix, rule in team_prefixes.items():
+        if name.startswith(prefix):
+            return rule(name)
+    
+    # Default cleaning: remove any CAPS sequence at the end of the name
+    match = re.search(r'^(.*?)([A-Z]{2,})$', name)
+    if match:
+        return match.group(1).strip()
             
-    return name if name else raw_name
+    return name
 
 def parse_score(score_elem):
     """Extract and validate score from element"""
@@ -415,20 +668,20 @@ def extract_tournament_date(link):
     return datetime(year, month, 1).date()
 
 def process_tournament(conn, link, region):
-    """Process a single tournament and store its matches"""
+    """Process a single tournament and store its matches with transaction handling"""
     tournament_name = f"{link.split('/')[-1].replace('_', ' ')} - {region}"
     tournament_date = extract_tournament_date(link)
     
     page_content = fetch_page_content(link)
     if not page_content:
-        print(f"Failed to fetch content for tournament: {tournament_name}")
-        return
+        logger.error(f"Failed to fetch content for tournament: {tournament_name}")
+        raise ScrapingError(f"Failed to fetch tournament content: {tournament_name}")
             
     match_soup = BeautifulSoup(page_content, 'html.parser')
     matches, dependencies = extract_match_data(match_soup, tournament_id=None)
     
     if not matches:
-        print(f"No matches found for tournament: {tournament_name}")
+        logger.warning(f"No matches found for tournament: {tournament_name}")
         return
         
     all_tbd = all(
@@ -437,92 +690,105 @@ def process_tournament(conn, link, region):
     )
     
     if all_tbd:
-        print(f"Skipping tournament {tournament_name} - all matches are TBD")
+        logger.info(f"Skipping tournament {tournament_name} - all matches are TBD")
         return
     
     with conn.cursor() as cur:
-        # Store tournament
-        cur.execute("""
-            INSERT INTO tournaments (name, date, region)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (name) DO UPDATE 
-            SET date = EXCLUDED.date, region = EXCLUDED.region
-            RETURNING tournament_id
-        """, (tournament_name, tournament_date, region))
-        tournament_id = cur.fetchone()[0]
-        
-        # Clear existing data
-        cur.execute("""
-            DELETE FROM match_dependencies 
-            WHERE source_match_id IN (SELECT match_id FROM matches WHERE tournament_id = %s)
-            OR target_match_id IN (SELECT match_id FROM matches WHERE tournament_id = %s);
-            DELETE FROM team_points WHERE tournament_id = %s;
-            DELETE FROM matches WHERE tournament_id = %s;
-        """, (tournament_id, tournament_id, tournament_id, tournament_id))
-        
-        # Store matches first and keep track of their IDs
-        match_ids = {}  # Maps bracket_index to match_id
-        matches_stored = 0
-        
-        for match in matches:
-            if match.get('team1') is None or match.get('team2') is None:
-                continue
-                
-            team1_id = store_team(cur, match['team1'], region)
-            team2_id = store_team(cur, match['team2'], region)
-            winner_id = None
-            if match.get('winner') and match['winner'] in (match['team1'], match['team2']):
-                winner_id = store_team(cur, match['winner'], region)
+        try:
+            # Start transaction
+            conn.autocommit = False
             
-            if team1_id is None or team2_id is None:
-                print(f"Skipping match due to invalid teams: {match['team1']} vs {match['team2']}")
-                continue
-            
+            # Store tournament
             cur.execute("""
-                INSERT INTO matches (
-                    tournament_id, team1_id, team2_id, winner_id, 
-                    score, stage, match_date, status
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING match_id
-            """, (
-                tournament_id, team1_id, team2_id, winner_id,
-                match.get('score'), match.get('stage'),
-                match.get('match_date'), match.get('status', 'completed')
-            ))
+                INSERT INTO tournaments (name, date, region)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (name) DO UPDATE 
+                SET date = EXCLUDED.date, region = EXCLUDED.region
+                RETURNING tournament_id
+            """, (tournament_name, tournament_date, region))
+            tournament_id = cur.fetchone()[0]
             
-            match_id = cur.fetchone()[0]
-            match_ids[match['bracket_index']] = match_id
+            # Clear existing data within the same transaction
+            cur.execute("""
+                DELETE FROM match_dependencies 
+                WHERE source_match_id IN (SELECT match_id FROM matches WHERE tournament_id = %s)
+                OR target_match_id IN (SELECT match_id FROM matches WHERE tournament_id = %s)
+            """, (tournament_id, tournament_id))
             
-            if match.get('status') == 'completed' and winner_id:
+            cur.execute("DELETE FROM team_points WHERE tournament_id = %s", (tournament_id,))
+            cur.execute("DELETE FROM matches WHERE tournament_id = %s", (tournament_id,))
+            
+            # Store matches and keep track of their IDs
+            match_ids = {}
+            matches_stored = 0
+            
+            for match in matches:
+                if match.get('team1') is None or match.get('team2') is None:
+                    continue
+                    
+                team1_id = store_team(cur, match['team1'], region)
+                team2_id = store_team(cur, match['team2'], region)
+                winner_id = None
+                if match.get('winner') and match['winner'] in (match['team1'], match['team2']):
+                    winner_id = store_team(cur, match['winner'], region)
+                
+                if team1_id is None or team2_id is None:
+                    logger.warning(f"Skipping match due to invalid teams: {match['team1']} vs {match['team2']}")
+                    continue
+                
                 cur.execute("""
-                    INSERT INTO team_points (team_id, tournament_id, points)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (team_id, tournament_id) DO UPDATE 
-                    SET points = EXCLUDED.points
-                """, (winner_id, tournament_id, 3))
+                    INSERT INTO matches (
+                        tournament_id, team1_id, team2_id, winner_id, 
+                        score, stage, match_date, status
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING match_id
+                """, (
+                    tournament_id, team1_id, team2_id, winner_id,
+                    match.get('score'), match.get('stage'),
+                    match.get('match_date'), match.get('status', 'completed')
+                ))
+                
+                match_id = cur.fetchone()[0]
+                match_ids[match['bracket_index']] = match_id
+                
+                if match.get('status') == 'completed' and winner_id:
+                    cur.execute("""
+                        INSERT INTO team_points (team_id, tournament_id, points)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (team_id, tournament_id) DO UPDATE 
+                        SET points = EXCLUDED.points
+                    """, (winner_id, tournament_id, 3))
+                
+                matches_stored += 1
             
-            matches_stored += 1
-        
-        # Store dependencies after all matches are stored
-        deps_stored = 0
-        for dep in dependencies:
-            source_id = match_ids.get(dep['source_idx'])
-            target_id = match_ids.get(dep['target_idx'])
+            # Store dependencies
+            deps_stored = 0
+            for dep in dependencies:
+                source_id = match_ids.get(dep['source_idx'])
+                target_id = match_ids.get(dep['target_idx'])
+                
+                if source_id and target_id:
+                    cur.execute("""
+                        INSERT INTO match_dependencies (
+                            source_match_id, target_match_id, position, dependency_type
+                        ) VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (source_match_id, target_match_id) DO UPDATE
+                        SET position = EXCLUDED.position,
+                            dependency_type = EXCLUDED.dependency_type
+                    """, (source_id, target_id, dep['position'], dep['dependency_type']))
+                    deps_stored += 1
             
-            if source_id and target_id:
-                cur.execute("""
-                    INSERT INTO match_dependencies (
-                        source_match_id, target_match_id, position, dependency_type
-                    ) VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (source_match_id, target_match_id) DO UPDATE
-                    SET position = EXCLUDED.position,
-                        dependency_type = EXCLUDED.dependency_type
-                """, (source_id, target_id, dep['position'], dep['dependency_type']))
-                deps_stored += 1
-        
-        conn.commit()
-        print(f"Stored {matches_stored} matches and {deps_stored} dependencies for tournament {tournament_name}")
+            # Commit transaction
+            conn.commit()
+            logger.info(f"Successfully stored {matches_stored} matches and {deps_stored} dependencies for tournament {tournament_name}")
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error processing tournament {tournament_name}: {e}")
+            raise
+        finally:
+            conn.autocommit = True
 
 def display_matches_by_region(region):
     """Display all matches for a specific region"""
@@ -628,34 +894,31 @@ def display_matches_by_region(region):
             conn.close()
 
 def main():
+    """Main execution function with proper resource cleanup"""
+    db_connection = None
     try:
         # Initialize database
         create_database()
-        conn = create_database_connection()
-        create_tables(conn)
+        db_connection = create_database_connection()
+        create_tables(db_connection)
 
         # Fetch and process overview page
-        html_content = fetch_overview_page()
+        html_content = fetch_page_content("/brawlstars/Brawl_Stars_Championship/2025")
         if not html_content:
-            raise Exception("Failed to fetch overview page")
+            raise ScrapingError("Failed to fetch overview page")
 
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Process each region's tournaments
-        regions = {
-            'EMEA': lambda x: 'EMEA' in x,
-            'North_America': lambda x: 'North_America' in x
-        }
-        
+        # Use config for regions
         processed_links = set()  # Keep track of processed tournament links
         
-        for region_name, region_filter in regions.items():
-            print(f"\nProcessing {region_name} tournaments...")
+        for region_name, region_filter in REGIONS.items():
+            logger.info(f"\nProcessing {region_name} tournaments...")
             tournament_links = [
                 a['href'] for a in soup.find_all('a', href=True)
                 if 'Monthly_Finals' in a['href'] 
                 and region_filter(a['href'])
-                and '/2025/' in a['href']  # Only process 2025 tournaments
+                and '/2025/' in a['href']
             ]
             
             for link in tournament_links:
@@ -663,21 +926,50 @@ def main():
                     continue
                     
                 try:
-                    process_tournament(conn, link, region_name)
+                    process_tournament(db_connection, link, region_name)
                     processed_links.add(link)  # Mark as processed
+                except (ScrapingError, DatabaseError) as e:
+                    logger.error(f"Error processing tournament {link}: {e}")
+                    continue
                 except Exception as e:
-                    print(f"Error processing tournament {link}: {e}")
+                    logger.error(f"Unexpected error processing tournament {link}: {e}")
                     continue
         
         # Display matches for each region after processing
-        for region in regions.keys():
-            display_matches_by_region(region)
+        for region in REGIONS.keys():
+            try:
+                display_matches_by_region(region)
+            except Exception as e:
+                logger.error(f"Error displaying matches for {region}: {e}")
             
+    except KeyboardInterrupt:
+        logger.info("Received interrupt signal, cleaning up...")
+        raise
     except Exception as e:
-        print(f"Fatal error: {e}")
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        raise
     finally:
-        if 'conn' in locals():
-            conn.close()
+        # Clean up resources
+        if db_connection:
+            try:
+                db_connection.close()
+                logger.info("Database connection closed")
+            except Exception as e:
+                logger.error(f"Error closing database connection: {e}")
+        
+        # Close the database pool
+        try:
+            db_pool.close()
+            logger.info("Database pool closed")
+        except Exception as e:
+            logger.error(f"Error closing database pool: {e}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("Program terminated by user")
+        sys.exit(0)
+    except Exception as e:
+        logger.critical("Unhandled exception occurred", exc_info=True)
+        sys.exit(1)
