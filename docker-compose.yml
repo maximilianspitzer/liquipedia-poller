@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  poller:
+    build: .
+    environment:
+      - DB_NAME=brawlstars_matches
+      - DB_USER=postgres           # Match your Unraid PostgreSQL container's user
+      - DB_PASSWORD=${DB_PASSWORD} # Will be set in Unraid
+      - DB_HOST=postgres          # Network name of your PostgreSQL container
+      - DB_PORT=5432
+      - UPDATE_INTERVAL=600
+      - LOG_LEVEL=INFO
+      - REQUESTS_PER_MINUTE=30
+      - MAX_RETRIES=3
+      - RETRY_DELAY=300
+    volumes:
+      - /mnt/user/appdata/liquipedia-poller/logs:/app/logs
+      - /mnt/user/appdata/liquipedia-poller/data:/app/data
+    restart: unless-stopped
+    network_mode: bridge    # Use bridge network to connect to other containers
+    healthcheck:
+      test: ["CMD", "python", "-c", "import psycopg2; psycopg2.connect(dbname='brawlstars_matches', user='postgres', password='${DB_PASSWORD}', host='postgres', port=5432)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  db:
+    image: postgres:16
+    environment:
+      - POSTGRES_USER=liquipedia
+      - POSTGRES_PASSWORD=yourpassword
+      - POSTGRES_DB=postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U liquipedia"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local

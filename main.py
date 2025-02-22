@@ -668,7 +668,12 @@ def extract_tournament_date(link):
     return datetime(year, month, 1).date()
 
 def process_tournament(conn, link, region):
-    """Process a single tournament and store its matches with transaction handling"""
+    """Process a single tournament and store its matches with transaction handling.
+    Returns:
+        - True: Successfully processed tournament with some non-TBD matches
+        - False: All matches were TBD
+        - None: Error occurred during processing
+    """
     tournament_name = f"{link.split('/')[-1].replace('_', ' ')} - {region}"
     tournament_date = extract_tournament_date(link)
     
@@ -682,7 +687,7 @@ def process_tournament(conn, link, region):
     
     if not matches:
         logger.warning(f"No matches found for tournament: {tournament_name}")
-        return
+        return False
         
     all_tbd = all(
         match['team1'] is None or match['team2'] is None
@@ -691,7 +696,7 @@ def process_tournament(conn, link, region):
     
     if all_tbd:
         logger.info(f"Skipping tournament {tournament_name} - all matches are TBD")
-        return
+        return False
     
     with conn.cursor() as cur:
         try:
@@ -782,6 +787,7 @@ def process_tournament(conn, link, region):
             # Commit transaction
             conn.commit()
             logger.info(f"Successfully stored {matches_stored} matches and {deps_stored} dependencies for tournament {tournament_name}")
+            return True
             
         except Exception as e:
             conn.rollback()

@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>liquipedia-poller</Name>
+  <Repository>your-docker-hub-username/liquipedia-poller</Repository>
+  <Registry>https://hub.docker.com/r/your-docker-hub-username/liquipedia-poller/</Registry>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/your-username/liquipedia-poller</Support>
+  <Project>https://github.com/your-username/liquipedia-poller</Project>
+  <Overview>Service that polls Liquipedia for Brawl Stars esports statistics and maintains a database.</Overview>
+  <Category>Tools: Status:Stable</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon>https://liquipedia.net/commons/images/thumb/5/53/Brawl_Stars_Logo_2019.png/600px-Brawl_Stars_Logo_2019.png</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DonateText/>
+  <DonateLink/>
+  <Description>Service that polls Liquipedia for Brawl Stars esports statistics and maintains a database for use by other services.</Description>
+  <Config Name="Database Name" Target="DB_NAME" Default="brawlstars_matches" Mode="" Description="PostgreSQL database name" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Database User" Target="DB_USER" Default="postgres" Mode="" Description="PostgreSQL username" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Database Password" Target="DB_PASSWORD" Default="" Mode="" Description="PostgreSQL password" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Database Host" Target="DB_HOST" Default="postgres" Mode="" Description="PostgreSQL host (container name)" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Database Port" Target="DB_PORT" Default="5432" Mode="" Description="PostgreSQL port" Type="Variable" Display="always" Required="true" Mask="false"/>
+  <Config Name="Update Interval" Target="UPDATE_INTERVAL" Default="600" Mode="" Description="How often to check for updates (in seconds)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Log Level" Target="LOG_LEVEL" Default="INFO" Mode="" Description="Logging level (DEBUG, INFO, WARNING, ERROR)" Type="Variable" Display="advanced" Required="false" Mask="false"/>
+  <Config Name="Logs Path" Target="/app/logs" Default="/mnt/user/appdata/liquipedia-poller/logs" Mode="rw" Description="Container Path: /app/logs" Type="Path" Display="advanced" Required="true" Mask="false"/>
+  <Config Name="Data Path" Target="/app/data" Default="/mnt/user/appdata/liquipedia-poller/data" Mode="rw" Description="Container Path: /app/data" Type="Path" Display="advanced" Required="true" Mask="false"/>
+</Container>
