@@ -75,29 +75,33 @@ MIGRATIONS = [
 
             -- Create update trigger function
             CREATE OR REPLACE FUNCTION update_updated_at_column()
-            RETURNS TRIGGER AS $$
+            RETURNS TRIGGER AS $func$
             BEGIN
                 NEW.updated_at = CURRENT_TIMESTAMP;
                 RETURN NEW;
             END;
-            $$ language 'plpgsql';
+            $func$ LANGUAGE plpgsql;
 
             -- Create triggers for all tables
+            DROP TRIGGER IF EXISTS update_teams_updated_at ON teams;
             CREATE TRIGGER update_teams_updated_at
                 BEFORE UPDATE ON teams
                 FOR EACH ROW
                 EXECUTE FUNCTION update_updated_at_column();
 
+            DROP TRIGGER IF EXISTS update_tournaments_updated_at ON tournaments;
             CREATE TRIGGER update_tournaments_updated_at
                 BEFORE UPDATE ON tournaments
                 FOR EACH ROW
                 EXECUTE FUNCTION update_updated_at_column();
 
+            DROP TRIGGER IF EXISTS update_matches_updated_at ON matches;
             CREATE TRIGGER update_matches_updated_at
                 BEFORE UPDATE ON matches
                 FOR EACH ROW
                 EXECUTE FUNCTION update_updated_at_column();
 
+            DROP TRIGGER IF EXISTS update_team_points_updated_at ON team_points;
             CREATE TRIGGER update_team_points_updated_at
                 BEFORE UPDATE ON team_points
                 FOR EACH ROW
@@ -174,6 +178,17 @@ def run_migrations(conn):
                     statements = [s.strip() for s in migration['up'].split(';') if s.strip()]
                     for statement in statements:
                         if statement:
+                            # Fix the trigger function syntax
+                            if 'CREATE OR REPLACE FUNCTION update_updated_at_column()' in statement:
+                                statement = """
+                                    CREATE OR REPLACE FUNCTION update_updated_at_column()
+                                    RETURNS TRIGGER AS $func$
+                                    BEGIN
+                                        NEW.updated_at = CURRENT_TIMESTAMP;
+                                        RETURN NEW;
+                                    END;
+                                    $func$ LANGUAGE plpgsql;
+                                """
                             cur.execute(statement)
                     
                     # Record successful migration
