@@ -49,10 +49,7 @@ BASE_URL = 'https://liquipedia.net'
 # Regions to monitor
 REGIONS: Dict[str, Callable[[str], bool]] = {
     'EMEA': lambda x: 'EMEA' in x,
-    'North_America': lambda x: 'North_America' in x,
-    'Americas': lambda x: 'Americas' in x,
-    'APAC': lambda x: 'APAC' in x,
-    'China': lambda x: 'China' in x
+    'North_America': lambda x: 'North_America' in x
 }
 
 # Known team names that should not be modified

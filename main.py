@@ -17,16 +17,17 @@ from config import *
 from exceptions import *
 from schema import Team, Tournament, Match, MatchDependency
 
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
-    format=LOG_FORMAT,
-    handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler()
-    ]
-)
+# Configure logging only if handlers haven't been set up
 logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL),
+        format=LOG_FORMAT,
+        handlers=[
+            logging.FileHandler(LOG_FILE),
+            logging.StreamHandler()
+        ]
+    )
 
 # Load environment variables
 load_dotenv()
@@ -380,7 +381,7 @@ def fetch_page_content(url, max_retries=3, retry_delay=5):
                 soup = BeautifulSoup(content, 'html.parser')
                 main_content = soup.find('div', class_='mw-parser-output')
                 
-                if main_content:
+                if (main_content):
                     logger.debug(f"Found main content area with {len(main_content.find_all('div'))} div elements")
                     return content
                 else:

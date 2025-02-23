@@ -80,24 +80,26 @@ class LiquipediaPollerService:
     def setup_logging(self):
         """Configure logging with rotation"""
         self.logger = logging.getLogger("LiquipediaPoller")
-        self.logger.setLevel(getattr(logging, LOG_LEVEL))
         
-        formatter = logging.Formatter(LOG_FORMAT)
-        
-        # File handler with rotation
-        file_handler = RotatingFileHandler(
-            LOG_FILE,
-            maxBytes=LOG_MAX_SIZE,
-            backupCount=LOG_BACKUP_COUNT
-        )
-        file_handler.setFormatter(formatter)
-        
-        # Console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        
-        self.logger.addHandler(file_handler)
-        self.logger.addHandler(console_handler)
+        # Only set up handlers if they haven't been set up already
+        if not self.logger.handlers:
+            self.logger.setLevel(getattr(logging, LOG_LEVEL))
+            formatter = logging.Formatter(LOG_FORMAT)
+            
+            # File handler with rotation
+            file_handler = RotatingFileHandler(
+                LOG_FILE,
+                maxBytes=LOG_MAX_SIZE,
+                backupCount=LOG_BACKUP_COUNT
+            )
+            file_handler.setFormatter(formatter)
+            
+            # Console handler
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(formatter)
+            
+            self.logger.addHandler(file_handler)
+            self.logger.addHandler(console_handler)
 
     def update_status(self, status=None, error=None):
         """Update service status and save to file"""
