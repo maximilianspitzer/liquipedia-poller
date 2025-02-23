@@ -443,18 +443,15 @@ def extract_team_name(raw_name):
     # Known team prefixes that have special cleaning rules
     team_prefixes = {
         'SKCalalas': lambda x: 'SKCalalas NA' if 'NASKC' in x else x,
-    }
-    
-    # Known teams that should not be modified at all
-    no_clean_teams = {
-        'Tribe Gaming',
-        'FUT Esports'
+        'FUT': lambda x: 'FUT Esports' if 'FUT' in x else x,
+        'HMBLE': lambda x: 'HMBLE',
+        'Eclipsar': lambda x: 'Eclipsar Esport'
     }
     
     name = raw_name.strip()
     
-    # Check for exact matches first
-    if name in no_clean_teams:
+    # Check for exact matches in NO_CLEAN_TEAMS from config
+    if name in NO_CLEAN_TEAMS:
         return name
         
     # Check for team prefixes with special rules
@@ -465,7 +462,9 @@ def extract_team_name(raw_name):
     # Default cleaning: remove any CAPS sequence at the end of the name
     match = re.search(r'^(.*?)([A-Z]{2,})$', name)
     if match:
-        return match.group(1).strip()
+        cleaned = match.group(1).strip()
+        # Double check if the cleaned version is in NO_CLEAN_TEAMS
+        return name if cleaned in NO_CLEAN_TEAMS else cleaned
             
     return name
 

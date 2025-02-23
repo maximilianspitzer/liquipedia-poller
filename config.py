@@ -56,7 +56,9 @@ REGIONS: Dict[str, Callable[[str], bool]] = {
 NO_CLEAN_TEAMS = {
     'Tribe Gaming',
     'FUT Esports',
-    'SKCalalas'
+    'SKCalalas',
+    'HMBLE',
+    'Eclipsar Esport'
 }
 
 # Service status file
