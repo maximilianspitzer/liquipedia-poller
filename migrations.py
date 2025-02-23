@@ -153,8 +153,10 @@ def run_migrations(conn):
             if version > current_version:
                 try:
                     logger.info(f"Running migration {version}: {migration['description']}")
-                    migration['up'](cur)
-                    cur.execute("UPDATE schema_version SET version = %s", (version,))
+                    # Execute the SQL string directly
+                    cur.execute(migration['up'])
+                    cur.execute("INSERT INTO schema_migrations (version, description) VALUES (%s, %s)",
+                              (version, migration['description']))
                     conn.commit()
                     logger.info(f"Successfully applied migration {version}")
                 except Exception as e:
