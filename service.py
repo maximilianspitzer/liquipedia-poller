@@ -121,7 +121,6 @@ class LiquipediaPollerService:
             self.update_status(status="running")
             
             db_connection = create_database_connection()
-            create_tables(db_connection)
             
             html_content = fetch_page_content("/brawlstars/Brawl_Stars_Championship/2025")
             if not html_content:
