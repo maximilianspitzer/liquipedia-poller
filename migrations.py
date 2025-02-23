@@ -138,33 +138,23 @@ def run_migrations(conn):
     """Run all pending migrations"""
     cur = None
     try:
-        conn.set_session(autocommit=False)
+        # Set autocommit to True before any operations
+        conn.set_session(autocommit=True)
+        
         cur = conn.cursor()
-        
-        # Create schema_migrations table if it doesn't exist
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                version INTEGER PRIMARY KEY,
-                description TEXT NOT NULL,
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-        
         current_version = get_current_version(cur)
         logger.info(f"Current database version: {current_version}")
         
-        # Run each migration that hasn't been applied yet
+        # Set autocommit to False for the migration transaction
+        conn.set_session(autocommit=False)
+        
         for migration in MIGRATIONS:
             version = migration['version']
             if version > current_version:
-                logger.info(f"Running migration {version}: {migration['description']}")
                 try:
-                    cur.execute(migration['up'])
-                    cur.execute(
-                        "INSERT INTO schema_migrations (version, description) VALUES (%s, %s)",
-                        (version, migration['description'])
-                    )
+                    logger.info(f"Running migration {version}: {migration['description']}")
+                    migration['up'](cur)
+                    cur.execute("UPDATE schema_version SET version = %s", (version,))
                     conn.commit()
                     logger.info(f"Successfully applied migration {version}")
                 except Exception as e:
@@ -182,5 +172,7 @@ def run_migrations(conn):
     finally:
         if cur:
             cur.close()
+            
+        # Set autocommit back to True after all operations
         if conn and not conn.closed:
             conn.set_session(autocommit=True)

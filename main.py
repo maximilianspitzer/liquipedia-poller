@@ -160,6 +160,9 @@ def create_database_connection():
             connect_timeout=DB_CONNECT_TIMEOUT
         )
         
+        # Set autocommit to True by default
+        conn.set_session(autocommit=True)
+        
         # Check if there's a lingering transaction and roll it back
         if conn.get_transaction_status() != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
             conn.rollback()
