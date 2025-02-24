@@ -476,15 +476,48 @@ def parse_score(score_elem):
     return score if score else '-'
 
 def get_stage_info(match_elem, match_info, match_idx=0):
-    """Determine the tournament stage for a match based on bracket structure"""
-    # Look for brkts-round element to determine round position
+    """
+    Determine the tournament stage for a match, prioritizing a timestamp-based approach.
+    If that fails, fall back to the original DOM-based detection, then the index-based fallback.
+    """
+
+    # -------------------------------------------------------
+    # 1) FIRST, TRY THE TIMESTAMP-SORTED APPROACH
+    #    We store a global/singleton list of "sorted_matches" in match_info
+    # -------------------------------------------------------
+    import copy
+    
+    # We only parse & sort once. After that, 'sorted_matches' is cached in match_info.
+    if 'sorted_matches' not in match_info:
+        match_info['sorted_matches'] = _build_sorted_matches(match_info.get('soup', match_elem.find_parent('body')))
+
+    sorted_matches = match_info['sorted_matches']
+    
+    # If we got no sorted matches, we can't use the timestamp approach
+    if sorted_matches:
+        # We'll try to identify which sorted match corresponds to this match_elem
+        match_index_in_sorted = _find_match_in_sorted_list(match_elem, sorted_matches)
+        if match_index_in_sorted is not None:
+            # If we found the match in sorted order, pick the stage by index
+            # (For an 8-team single elim, that means 7 total scheduled matches:
+            # first 4 => Quarterfinals, next 2 => Semifinals, last => Grand Final)
+            if match_index_in_sorted < 4:
+                return "Quarter-finals"
+            elif match_index_in_sorted < 6:
+                return "Semi-finals"
+            else:
+                return "Grand Final"
+    
+    # -------------------------------------------------------
+    # 2) IF WE GET HERE, WE FALL BACK TO YOUR ORIGINAL CODE
+    # -------------------------------------------------------
     round_elem = match_elem.find_parent('div', class_='brkts-round')
     if round_elem:
         # Find how many rounds there are in total
         all_rounds = round_elem.find_parent().find_all('div', class_='brkts-round')
         total_rounds = len(all_rounds)
         current_round = all_rounds.index(round_elem)
-        
+
         # In reverse order: final round is the last one, semis second to last, etc.
         if current_round == total_rounds - 1:
             return "Grand Final"
@@ -492,14 +525,101 @@ def get_stage_info(match_elem, match_info, match_idx=0):
             return "Semi-finals"
         else:
             return "Quarter-finals"
-    
-    # Fallback to index-based detection if round structure is not found
+
+    # 3) Final fallback: the original index-based detection
     if match_idx < 4:
         return "Quarter-finals"
     elif match_idx < 6:
         return "Semi-finals"
     else:
         return "Grand Final"
+
+
+def _build_sorted_matches(soup):
+    """
+    Parse every .brkts-match from the bracket, extract (timestamp, teams, original_elem).
+    Sort them by timestamp. Return a list of dicts.
+    
+    Skip matches that are 'TBD vs TBD' or that have no timestamp.
+    """
+    from bs4 import BeautifulSoup
+    
+    if not soup:
+        return []
+    
+    # If 'soup' is actually a Tag, we can search. Otherwise, user might have passed the entire HTML string
+    if isinstance(soup, str):
+        soup = BeautifulSoup(soup, 'html.parser')
+    
+    # Find all .brkts-match elements
+    all_match_divs = soup.find_all('div', class_='brkts-match')
+    results = []
+
+    for match_div in all_match_divs:
+        teamA, teamB = _extract_team_names(match_div)
+        timestamp = _extract_timestamp(match_div)
+        
+        # If both teams are TBD, skip; if no timestamp, skip
+        if (teamA == "TBD" and teamB == "TBD") or (timestamp is None):
+            continue
+        
+        results.append({
+            'timestamp': timestamp,
+            'teamA': teamA,
+            'teamB': teamB,
+            'elem': match_div  # store the original element so we can compare
+        })
+    
+    # Sort by timestamp ascending
+    results.sort(key=lambda x: x['timestamp'])
+    return results
+
+
+def _extract_team_names(match_elem):
+    """Pull the first two .brkts-opponent-entry elements and return (teamA, teamB)."""
+    opponents = match_elem.find_all('div', class_='brkts-opponent-entry', limit=2)
+    if len(opponents) == 2:
+        nameA = opponents[0].get('aria-label', 'TBD').strip()
+        nameB = opponents[1].get('aria-label', 'TBD').strip()
+        return (nameA, nameB)
+    return ("TBD", "TBD")
+
+
+def _extract_timestamp(match_elem):
+    """
+    Look for a <span class="timer-object" data-timestamp="...">; return that as int, or None if missing.
+    """
+    timer_span = match_elem.find('span', class_='timer-object')
+    if timer_span and timer_span.has_attr('data-timestamp'):
+        try:
+            return int(timer_span['data-timestamp'])
+        except ValueError:
+            return None
+    return None
+
+
+def _find_match_in_sorted_list(match_elem, sorted_matches):
+    """
+    Return the index (0-based) of this match_elem in sorted_matches, or None if not found.
+    We'll do a quick check of 'is it the same Tag object?' 
+    If that fails (some libraries clone Tag objects), then compare the (teams, timestamp) as a fallback.
+    """
+    # First try direct object comparison:
+    for i, item in enumerate(sorted_matches):
+        if item['elem'] is match_elem:
+            return i
+    
+    # If direct reference didn’t match, compare key data (teams+timestamp):
+    me_teamA, me_teamB = _extract_team_names(match_elem)
+    me_ts = _extract_timestamp(match_elem)
+    for i, item in enumerate(sorted_matches):
+        if (item['teamA'] == me_teamA and
+            item['teamB'] == me_teamB and
+            item['timestamp'] == me_ts):
+            return i
+
+    return None
+
 
 def extract_match_data(soup, tournament_id):
     matches = []
