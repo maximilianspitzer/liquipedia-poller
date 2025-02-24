@@ -37,3 +37,4 @@ wheels/
 # Database
 *.db
 *.sqlite3
+docker-compose.dev.yml
